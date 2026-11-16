@@ -3832,6 +3832,215 @@ async function boot(hot){
   window.claude?.hot?.snapshot?.(()=>({save:serialize(), speed:S.speed}));
 }
 window.claude?.hot?.ready ? window.claude.hot.ready(boot) : boot(window.claude?.hot?.data ?? null);
+
+/* =================== GAME FEEL ROUND ===================
+   Hands-on park: tap a busy shop to serve, tap litter to pick it up, tap a broken ride to fix it.
+   Coaster ride cam with speed, G-force and a scream meter. Dizzy bots wobble.
+   Rusty talks: taunts on the map, a Half-Price Day stunt, poaching your crew.
+   New surprise days you play: a critic in disguise, a lost little bot, a celebrity visit.
+   Bots have quirks and a story you can read, and happy bots come back as regulars.
+   Bot City's skyline grows across the road, the gate gets fancier, and milestones get fireworks. */
+(function(){
+const FUN=window.FUN={combo:0, comboT:0, cleaned:0, lastTaunt:0, tier:-1, fw:[], regularsToast:0};
+const css=document.createElement('style'); css.textContent=`
+#funOver{position:fixed;inset:0;pointer-events:none;z-index:5;overflow:hidden}
+#funOver .mk{position:absolute;transform:translate(-50%,-100%);font:800 12px/1 Inter,system-ui,sans-serif;padding:4px 7px;border-radius:999px;white-space:nowrap;color:#0F172A;background:#FDE68A;box-shadow:0 2px 8px rgba(0,0,0,.35)}
+#funOver .mk.tap{background:#00E676;animation:funPulse .9s ease-in-out infinite}
+#funOver .mk.fix{background:#F59E0B}
+#funOver .mk.lost{background:#93C5FD}
+#funOver .mk.celeb{background:#F0ABFC}
+#funOver .mk.reg{background:transparent;box-shadow:none;font-size:15px;padding:0}
+#funOver .mk.dz{background:transparent;box-shadow:none;font-size:16px;padding:0;animation:funSpin 1s linear infinite}
+@keyframes funPulse{0%,100%{transform:translate(-50%,-100%) scale(1)}50%{transform:translate(-50%,-110%) scale(1.08)}}
+@keyframes funSpin{to{filter:hue-rotate(360deg)}}
+#funCombo{position:fixed;left:50%;top:120px;transform:translateX(-50%);font:900 22px/1 Inter,system-ui,sans-serif;color:#00E676;text-shadow:0 2px 0 #052e16,0 0 18px rgba(0,230,118,.6);pointer-events:none;z-index:6;opacity:0;transition:opacity .25s}
+#rustyTalk{position:fixed;z-index:6;max-width:250px;display:flex;gap:8px;align-items:flex-start;background:#1F1410;color:#FDE7D3;border:2px solid #C2410C;border-radius:14px;padding:8px 10px;font:600 13px/1.35 Inter,system-ui,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.45);pointer-events:none;transform:translate(-50%,-100%);opacity:0;transition:opacity .3s}
+#rustyTalk img{width:30px;height:34px;object-fit:contain;flex:none}
+#rustyTalk b{display:block;color:#FB923C;font-size:11px;letter-spacing:.06em;text-transform:uppercase}
+#rustyTalk.dock{left:auto!important;right:16px;top:auto!important;bottom:96px;transform:none}
+#thrillHud{position:fixed;left:50%;bottom:110px;transform:translateX(-50%);display:none;gap:18px;align-items:flex-end;background:rgba(2,6,23,.72);border:1px solid rgba(255,255,255,.15);border-radius:16px;padding:10px 16px;color:#F8FAFC;font:700 12px/1.1 Inter,system-ui,sans-serif;z-index:7;pointer-events:none}
+body.ridecam #thrillHud{display:flex}
+#thrillHud .v{font-size:26px;font-weight:900;display:block;color:#FBBF24}
+#thrillHud .sc{width:140px;height:10px;border-radius:9px;background:rgba(255,255,255,.12);overflow:hidden;margin-top:6px}#thrillHud .sc i{display:block;height:100%;background:linear-gradient(90deg,#22C55E,#FBBF24,#EF4444);width:0}
+#thrillShout{position:fixed;left:50%;top:38%;transform:translate(-50%,-50%) rotate(-4deg);font:900 54px/1 Inter,system-ui,sans-serif;color:#FFF;text-shadow:0 4px 0 #B91C1C,0 0 30px rgba(239,68,68,.8);pointer-events:none;z-index:7;opacity:0;transition:opacity .2s}
+.bt-story{margin:0;padding:0;list-style:none;font-size:12.5px}.bt-story li{display:flex;gap:8px;padding:3px 0;border-bottom:1px dashed rgba(148,163,184,.25)}.bt-story time{color:#64748B;min-width:52px;font-variant-numeric:tabular-nums}
+.bt-chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:800;margin:2px 4px 2px 0;background:#E0F2FE;color:#075985}.bt-chip.reg{background:#FEF3C7;color:#92400E}`;
+document.head.appendChild(css);
+const over=document.createElement('div'); over.id='funOver'; document.body.appendChild(over);
+const comboEl=document.createElement('div'); comboEl.id='funCombo'; document.body.appendChild(comboEl);
+const rt=document.createElement('div'); rt.id='rustyTalk'; document.body.appendChild(rt);
+const th=document.createElement('div'); th.id='thrillHud'; th.innerHTML='<div><span class="v" id="thKmh">0</span>km/h</div><div><span class="v" id="thG">1.0</span>G</div><div>SCREAM METER<div class="sc"><i id="thScream"></i></div></div>'; document.body.appendChild(th);
+const shout=document.createElement('div'); shout.id='thrillShout'; document.body.appendChild(shout);
+const V=new THREE.Vector3(); const scr=(p)=>{ V.copy(p).project(camera); if(V.z>1) return null; return [(V.x+1)/2*innerWidth,(1-V.y)/2*innerHeight]; };
+const clockStr=m=>{ const h=Math.floor(m/60), mm=Math.floor(m%60); return ((h%12)||12)+':'+String(mm).padStart(2,'0')+(h<12?'a':'p'); };
+const objCenter=o=>W3(o.x+(o.w-1)/2, o.y+(o.h-1)/2);
+
+/* ---------- 1 · hands-on ---------- */
+const rushCD=new Map();
+function bump(label){ const now=performance.now(); FUN.combo = now-FUN.comboT<1600 ? FUN.combo+1 : 1; FUN.comboT=now; if(FUN.combo>=3){ comboEl.textContent=label+' ×'+FUN.combo; comboEl.style.opacity=1; clearTimeout(bump.t); bump.t=setTimeout(()=>comboEl.style.opacity=0,1200); } tone(520+Math.min(FUN.combo,20)*35,.07,'triangle',.05); }
+FUN.rush=function(s){ const now=performance.now(); if(now-(rushCD.get(s.id)||0)<220) return false; rushCD.set(s.id,now); const b=botById(s.queue.shift()); if(!b || b.gone) return false; const before=b.spent; transact(s,b); bump('⚡ Serve'); if(b.spent>before){ S.today.rushServed=(S.today.rushServed||0)+1; if(FUN.combo%5===0){ const tip=Math.min(5,FUN.combo/5); S.cash+=tip; S.today.rev+=tip; floatText('Tip +'+money(tip,0), objCenter(s).setY(SHOPS[s.kind].hgt+.7)); } } return true; };
+FUN.fix=function(r){ r.fixT=(r.fixT||0)+1; const p=objCenter(r).setY(1.4); floatText('🔧 '+Math.min(100,r.fixT*20)+'%', p); sfx('tick'); spawnSmoke && spawnSmoke(p.clone().setY(.6)); if(r.fixT>=5){ r.fixT=0; r.rs='idle'; r.rt=0; r.rel=Math.min(100,r.rel+10); S.today.selfFix=(S.today.selfFix||0)+1; sfx('chime'); floatText('Fixed it yourself!', p.clone().setY(1.9)); news('You fixed the '+RIDES[r.kind].short+' yourself. No repair bill.', r, 'info'); } };
+FUN.clean=function(tx,ty){ const t=tile(tx,ty); if(!t || !(t.lit>0)) return false; const n=Math.min(t.lit,3); t.lit-=n; world.litterDirty=true; FUN.cleaned+=n; bump('✨ Clean'); floatText('✨ +'+n, W3(tx,ty).setY(.5)); if(FUN.cleaned%15<n){ S.rating=clamp(S.rating+.02,.5,5); floatText('Bots noticed!', W3(tx,ty).setY(1)); } return true; };
+const nearBot=(cx,cy)=>{ for(const b of S.bots){ const r=botMeshes.get(b.id); if(!r||!r.root.visible) continue; V.copy(r.root.position); V.y+=.25; V.project(camera); if(Math.hypot((V.x+1)/2*innerWidth-cx,(1-V.y)/2*innerHeight-cy)<22) return b; } return null; };
+const _ca=clickAt;
+clickAt=function(cx,cy){
+  if(!S || titleMode || ui.tool!=='select' || ui.rideCam) return _ca(cx,cy);
+  const nb=nearBot(cx,cy); if(nb && (nb.critic||nb.lost||nb.celeb)){ specialTap(nb); }
+  if(!nb){ ndc.set(cx/innerWidth*2-1, -(cy/innerHeight)*2+1); ray.setFromCamera(ndc,camera);
+    const hits=ray.intersectObjects([...objMeshes.values()], true);
+    for(const h of hits){ const id=h.object.userData.objId||(h.object.parent&&h.object.parent.userData.objId); if(!id) continue; const o=S.objs.find(q=>q.id===id); if(!o) continue;
+      if(o.type==='ride' && o.rs==='broken' && !o.building){ FUN.fix(o); return; }
+      if(o.type==='shop' && o.queue && o.queue.length && o.staff>0){ FUN.rush(o); if(ui.sel!==o.id) select(o.id); return; }
+      break; }
+    if(!hits.length){ const t=groundTile(cx,cy); if(t && FUN.clean(t.x,t.y)) return; } }
+  return _ca(cx,cy); };
+
+/* ---------- 2 · coaster feel ---------- */
+const RC={last:null, v:0, vy:0, scream:0, shoutT:0};
+const _urc=updateRideCam;
+updateRideCam=function(dt){ _urc(dt); if(!ui.rideCam) { RC.last=null; return; } const p=camera.position.clone();
+  if(RC.last && dt>0){ const d=p.clone().sub(RC.last), v=d.length()/dt, vy=d.y/dt; const acc=(vy-RC.vy)/dt; RC.v+=(v-RC.v)*Math.min(1,dt*6); const g=1-acc/9.8*.35; RC.g=(RC.g||1)+(clamp(g,-1.5,5)-(RC.g||1))*Math.min(1,dt*5); RC.vy=vy;
+    RC.scream=clamp(RC.scream+(RC.v>2.2?dt*(RC.v-2)*.35:-dt*.4)+(vy<-1.5?dt*.6:0),0,1);
+    if(vy<-2.4 && RC.shoutT<=0){ RC.shoutT=2.2; shout.textContent=pick(['AAAAAH!','WHOOOA!','EEEEE!','NOPE NOPE!']); shout.style.opacity=1; setTimeout(()=>shout.style.opacity=0,700); tone(880,.25,'sawtooth',.03,0,320); }
+    RC.shoutT-=dt; const k=Math.min(.04,RC.v*.006); camera.position.x+=(Math.random()-.5)*k; camera.position.y+=(Math.random()-.5)*k; }
+  RC.last=p; $('#thKmh').textContent=Math.round(RC.v*11); $('#thG').textContent=(RC.g||1).toFixed(1); $('#thScream').style.width=Math.round(RC.scream*100)+'%'; };
+const _ru=rideUpdate;
+rideUpdate=function(r, dm){ _ru(r, dm); const d=RIDES[r.kind]; if(r.queue && r.queue.length>2 && d && d.E>5 && Math.random()<dm*.012){ const b=botById(pick(r.queue)); if(b) think(b, pick(['Can\'t wait to ride '+(d.name||d.short)+'!','My hands are shaking already','Front row or nothing']), false, null, 'Excited for rides'); } };
+
+/* ---------- 3 · Rusty talks ---------- */
+const TAUNT={idle:['My soda costs half. Your move, kid.','Quality? Never heard of her.','Nice park. Shame if a cart opened right next to it.','Bots want cheap. I\'m cheap.','You pay your staff WHAT? Ha.'],
+  trash:['Look at all that trash. My kind of place.','Smells like ScrapCo over there. I love it.'],
+  good:['Okay, your park is... fine. Whatever.','Don\'t get comfortable. Rusty\'s always watching.'],
+  broke:['Running low on cash? I\'m hiring.','Need a loan? My rates are terrible.'],
+  cart:['Heh. New cart, right next to your busiest path.','Another Scrap cart! Customers love a bargain.'],
+  stunt:['Half-Price Day! Come and get it!','Everything 50% off. Can your margins take it?']};
+function rustyLine(kind){ if(!S || S.rival && S.rival.out) return; const now=performance.now(); if(now-FUN.lastTaunt<(kind==='idle'?45000:6000)) return; FUN.lastTaunt=now;
+  rt.innerHTML=`<img src="${PORT.rusty||''}" alt=""><div><b>Rusty · ScrapCo</b>${pick(TAUNT[kind]||TAUNT.idle)}</div>`; rt.style.opacity=1; if(rustyRig) rigPlay(rustyRig,'UpPoint',true); clearTimeout(rustyLine.t); rustyLine.t=setTimeout(()=>rt.style.opacity=0, 5200); }
+FUN.rustyLine=rustyLine;
+const _news=news; news=function(msg, o, type){ try{ if(/ScrapCo opened/.test(msg)) rustyLine('cart'); }catch(e){} return _news.apply(this, arguments); };
+EVENTS.push(
+ {id:'stunt', w:1.6, cond:()=>!(S.rival&&S.rival.out) && rivalStalls().length>0 && S.day>4 && shopsWithNeed().length>0, who:'rusty',
+  title:'Rusty\'s Half-Price Day', text:()=>'Everything at ScrapCo is <b>half off today</b>. Heh. Let\'s see how your margins like that.',
+  lesson:'A one-day sale from a rival is a stunt. Matching it costs margin on every sale you make. Faster service or something they don\'t sell can protect your price.',
+  choices:()=>[{t:'Match it for today', s:'Your food and drink prices −30% today', f:()=>{ shops().filter(s=>SHOPS[s.kind].need==='thirst'||SHOPS[s.kind].need==='hunger').forEach(s=>{ s.prePrice=s.price; s.price=Math.max(.25,Math.round(s.price*.7*4)/4); }); S.timed.push({k:'restore',d:1}); setTimeout(()=>rustyLine('stunt'),1500); }},
+    {t:'Extra crew for the day ($300)', s:'Lines move 40% faster, bots stay happy', f:()=>{ S.cash-=300; S.today.wages=(S.today.wages||0)+300; S.timed.push({k:'undercut',need:'thirst',m:.85,d:1},{k:'undercut',need:'hunger',m:.85,d:1},{k:'rushcrew',d:1}); }},
+    {t:'Ignore him', s:'You keep your price, he takes some sales', f:()=>{ S.timed.push({k:'undercut',need:'thirst',m:.72,d:1},{k:'undercut',need:'hunger',m:.72,d:1}); setTimeout(()=>rustyLine('stunt'),1500); }}]},
+ {id:'poach', w:1.2, cond:()=>!(S.rival&&S.rival.out) && S.day>5 && shops().filter(s=>s.staff>0&&!SHOPS[s.kind].landmark).length>=2, who:'rusty', setup:e=>{ e.shop=pick(shops().filter(s=>s.staff>0&&!SHOPS[s.kind].landmark)); },
+  title:'Rusty is poaching your crew', text:e=>'I offered your best worker at the <b>'+SHOPS[e.shop.kind].name+'</b> a job at ScrapCo. More money. Free scrap. What\'s it gonna be?',
+  lesson:'Losing a trained worker costs more than their pay: hiring, training and slower service. A raise is a recurring cost, a bonus is a one-time cost.',
+  choices:e=>[{t:'Give them a raise', s:'Better pay at this shop from now on', f:()=>{ e.shop.pay=Math.min(PAY.length-1,(e.shop.pay||1)+1); }},
+    {t:'One-time bonus ($250)', s:'Cheaper today, they may get asked again', f:()=>{ S.cash-=250; S.today.wages=(S.today.wages||0)+250; }},
+    {t:'Let them go', s:'One less worker at that shop', f:()=>{ e.shop.staff=Math.max(0,e.shop.staff-1); news('Your '+SHOPS[e.shop.kind].name+' lost a worker to ScrapCo.', e.shop, 'warn'); setTimeout(()=>rustyLine('good'),1200); }}]},
+
+/* ---------- 4 · surprise days you play ---------- */
+ {id:'critic', w:1.5, cond:()=>S.day>3 && shops().length>=2, who:'mb',
+  title:'A food critic is here today', text:()=>'A famous critic is in the park <b>in disguise</b>. They have a <b>❓</b> over their head. Tap them to give VIP treatment before they leave. A good review means a rush of new bots.',
+  lesson:'One trusted review can bring more customers than a week of ads, and one bad visit can cost you. Every customer could be the one who talks.',
+  choices:()=>[{t:'Keep an eye out', s:'Find the ❓ bot and tap it', f:()=>{ FUN.spawnSpecial('critic'); }}]},
+ {id:'lostbot', w:1.3, cond:()=>S.day>2, who:'mb',
+  title:'A little bot got lost', text:()=>'A family bot lost track of their kid. Look for the crying <b>😢</b> bot on your paths and tap them to walk them back to the gate.',
+  lesson:'Good service is more than selling things. Parks that look after their guests earn trust, and trust brings families back.',
+  choices:()=>[{t:'I\'ll find them', s:'Tap the 😢 bot', f:()=>{ FUN.spawnSpecial('lost'); }}]},
+ {id:'celeb', w:1.2, cond:()=>S.day>5 && S.rating>=3, who:'mb',
+  title:'DJ Volt is visiting', text:()=>'Bot City\'s most famous DJ is touring your park today. Fans follow them everywhere they go.',
+  lesson:'Celebrity visits are free marketing, but only if your park can handle the crowd. Stock and staff matter more on big days.',
+  choices:()=>[{t:'Roll out the red carpet ($400)', s:'Bigger crowd, DJ Volt stays longer', f:()=>{ S.cash-=400; S.today.mkt=(S.today.mkt||0)+400; S.fx.guest=(S.fx.guest||1)*1.35; FUN.spawnSpecial('celeb',true); }},
+    {t:'Let them enjoy it quietly', s:'Some extra fans show up', f:()=>{ S.fx.guest=(S.fx.guest||1)*1.15; FUN.spawnSpecial('celeb',false); }}]}
+);
+FUN.spawnSpecial=function(kind, vip){ const n=S.bots.length; const tryIt=()=>{ if(S.min<7*60 || S.min>19*60){ setTimeout(tryIt,1500); return; } spawnBot(); const b=S.bots[S.bots.length-1]; if(!b || S.bots.length===n){ setTimeout(tryIt,1500); return; }
+  if(kind==='critic'){ b.critic=true; b.name='Critic '+pick(['Reva','Ozzy','Plume','Marlo']); b.money+=40; b.stay*=1.2; }
+  if(kind==='celeb'){ b.celeb=true; b.name='DJ Volt'; b.money+=80; b.stay*=vip?1.8:1.2; b.happy=Math.min(100,b.happy+(vip?20:5)); }
+  if(kind==='lost'){ const P=[]; for(let y=0;y<N;y++) for(let x=0;x<N;x++) if(isPath(x,y) && Math.abs(x-ENT.x)+Math.abs(y-ENT.y)>6) P.push([x,y]); const p=P.length?pick(P):[ENT.x+3,ENT.y]; b.x=p[0]; b.y=p[1]; b.lost=true; b.lostT=180; b.name='Little '+pick(['Bolt','Pip','Sprocket','Nib']); b.happy=40; b.path=[]; b.state='wait'; think(b,'Where\'s my family?!',true); }
+  logEv(b,kind==='lost'?'Got separated from family':kind==='critic'?'Arrived, notebook in hand':'Arrived with a crowd of fans'); };
+  tryIt(); };
+function specialTap(b){
+  if(b.critic && !b.found){ b.found=true; b.happy=Math.min(100,b.happy+25); think(b,'Oh! You noticed me. Impressive service.',true,null,'VIP service'); sfx('chime'); floatText('VIP treatment!', botMeshes.get(b.id).root.position.clone().setY(.9)); }
+  else if(b.lost){ b.lost=false; S.rating=clamp(S.rating+.05,.5,5); think(b,'Thank you!! Back to the gate!',true,null,'Helpful staff'); leave(b); sfx('fanfare'); confetti(); news(b.name+' is back with their family. They left your park a 5-star review.', null, 'info'); }
+  else if(b.celeb){ think(b,pick(['This park slaps!','Shoutout to the lemonade!','Selfie time!']),true,null,'Celebrity visit'); sfx('pop'); } }
+const _bu=botUpdate; botUpdate=function(b, dm){
+  if(b.lost){ b.lostT-=dm; b.state='wait'; b.path=[]; if(b.thoughtT<5) think(b,pick(['Where\'s my family?!','Mom? Dad?','I want to go home...']),true); if(b.lostT<=0){ b.lost=false; S.rating=clamp(S.rating-.04,.5,5); news(b.name+' found the gate alone. The family wasn\'t impressed.', null, 'warn'); leave(b); } return; }
+  _bu(b, dm);
+  if(b.celeb && !b.gone){ for(const o of S.bots){ if(o!==b && !o.gone && Math.abs(o.x-b.x)+Math.abs(o.y-b.y)<=3){ o.happy=Math.min(100,o.happy+dm*.04); if(Math.random()<dm*.004) think(o,'Is that DJ VOLT?!',false,null,'Celebrity visit'); } } }
+  if(b.trait==='neat' && Math.random()<dm*.02){ const t=tile(b.x,b.y); if(t && t.lit>1){ b.happy-=2; think(b,'This place is filthy.',false,'Litter'); } }
+};
+const _sh=shopUpdate; shopUpdate=function(s, dm){ const boost=S.timed.some(t=>t.k==='rushcrew'); return _sh(s, boost?dm*1.4:dm); };
+const _nd=newDay; newDay=function(){ const restore=S.timed.some(t=>t.k==='restore'); const r=_nd.apply(this, arguments); if(restore && !S.timed.some(t=>t.k==='restore')) shops().forEach(s=>{ if(s.prePrice!=null){ s.price=s.prePrice; delete s.prePrice; } }); return r; };
+
+/* ---------- 5 · quirks, stories, regulars ---------- */
+const QUIRKS={snacker:{n:'Snack fan',f:b=>{ b.needs.hunger=Math.min(99,b.needs.hunger+15); }}, thrill:{n:'Thrill seeker',f:b=>{ b.thrill+=3; }}, frugal:{n:'Penny pincher',f:b=>{ b.money*=.75; }}, neat:{n:'Neat freak',f:()=>{}}, spender:{n:'Big spender',f:b=>{ b.money*=1.4; }}, social:{n:'Social butterfly',f:b=>{ b.happy=Math.min(100,b.happy+5); }}};
+function logEv(b, txt){ b.log=b.log||[]; if(b.log.length && b.log[b.log.length-1].t===txt) return; b.log.push({m:S.min, t:txt}); if(b.log.length>14) b.log.shift(); }
+FUN.logEv=logEv;
+const _sb=spawnBot; spawnBot=function(){ const n=S.bots.length; const r=_sb.apply(this, arguments); if(S.bots.length===n) return r; const b=S.bots[S.bots.length-1];
+  b.trait=pick(Object.keys(QUIRKS)); QUIRKS[b.trait].f(b);
+  const R=S.regulars=S.regulars||[]; const here=new Set(S.bots.filter(x=>x.reg).map(x=>x.reg));
+  if(R.length && Math.random()<Math.min(.28,.04+R.length*.02)){ const rec=pick(R.filter(x=>!here.has(x.id))); if(rec){ b.reg=rec.id; b.name=rec.name; b.tint=rec.tint; b.trait=rec.trait; rec.visits++; b.happy=Math.min(100,b.happy+(rec.grumpy?-4:6)); b.money*=1.15;
+    think(b, rec.grumpy?'Giving this place one more chance.':pick(['Back again! Visit #'+rec.visits+'.','Missed this place!','My favorite park in Bot City.', rec.fav?'Gotta get my '+rec.fav+'.':'Same time next week!']), true, null, rec.grumpy?null:'Regulars'); } }
+  logEv(b, b.reg?'Came back for visit #'+(R.find(x=>x.id===b.reg)||{}).visits:'Arrived at the gate'); return r; };
+const _tr=transact; transact=function(s, b){ const sp=b.spent; const r=_tr(s, b); if(b.spent>sp){ logEv(b,'Bought '+SHOPS[s.kind].item+' for '+money(b.spent-sp,2)); b.fav=b.fav||SHOPS[s.kind].item; } else logEv(b,'Left the '+SHOPS[s.kind].name+' without buying'); return r; };
+const _fr=finishRide; finishRide=function(r){ const ids=(r.riders||[]).slice(); const res=_fr(r); ids.forEach(id=>{ const b=botById(id); if(b) logEv(b,(b.sick>0?'Rode the '+RIDES[r.kind].short+' (dizzy now)':'Rode the '+RIDES[r.kind].short)); }); return res; };
+const _th=think; think=function(b, txt, force, key, good){ const r=_th.apply(this, arguments); if(b && txt && (key||good)) logEv(b,'“'+txt+'”'); return r; };
+const _ds=despawn; despawn=function(b){ const R=S.regulars=S.regulars||[];
+  if(b.critic){ if(b.happy>=70){ S.fx.guest=(S.fx.guest||1)*1.25; S.rating=clamp(S.rating+.12,.5,5); news(b.name+' wrote a glowing review'+(b.found?' and mentioned the VIP service':'')+'. Expect more bots!', null, 'info'); sfx('fanfare'); } else { S.rating=clamp(S.rating-.12,.5,5); news(b.name+' gave you a rough review. Cleaner paths and shorter lines would help.', null, 'bad'); } }
+  if(b.reg){ const rec=R.find(x=>x.id===b.reg); if(rec){ rec.last=Math.round(b.happy); rec.grumpy=b.happy<40; if(b.fav) rec.fav=b.fav; if(b.happy<25){ R.splice(R.indexOf(rec),1); } } }
+  else if(!b.lost && !b.critic && !b.celeb && b.happy>=72 && b.spent>=12 && Math.random()<.35){ R.push({id:'r'+(S.day*1000+b.id), name:b.name, tint:b.tint, trait:b.trait, visits:1, fav:b.fav||'', last:Math.round(b.happy)}); if(R.length>30) R.shift(); if(FUN.regularsToast<3){ FUN.regularsToast++; toast('<b>'+b.name+'</b> loved it and will come back. Regulars are free advertising.', 'info'); } }
+  return _ds(b); };
+const _bbp=buildBotPanel; buildBotPanel=function(){ _bbp(); const I=$('#inspect'); const sec=document.createElement('div'); sec.className='sec'; sec.innerHTML='<div data-k="bchips"></div><h5 style="margin-top:6px">Today\'s story</h5><ul class="bt-story" data-k="bstory"></ul>'; const last=I.querySelector('[data-a="follow"]'); (last?last.closest('.sec'):null) ? I.insertBefore(sec, last.closest('.sec')) : I.appendChild(sec); refreshBotPanel(); };
+const _rbp=refreshBotPanel; refreshBotPanel=function(){ _rbp(); const b=botById(ui.selBot); if(!b) return; const c=$('#inspect [data-k="bchips"]'), st=$('#inspect [data-k="bstory"]'); if(!c||!st) return; const rec=b.reg&&(S.regulars||[]).find(x=>x.id===b.reg);
+  const ch=(b.trait?'<span class="bt-chip">'+QUIRKS[b.trait].n+'</span>':'')+(rec?'<span class="bt-chip reg">⭐ Regular · visit #'+rec.visits+'</span>':'')+(b.critic?'<span class="bt-chip reg">'+(b.found?'Critic (VIP)':'❓ Mystery guest')+'</span>':'')+(b.celeb?'<span class="bt-chip reg">⭐ Celebrity</span>':''); if(c.innerHTML!==ch) c.innerHTML=ch;
+  const L=(b.log||[]).slice(-7).reverse().map(e=>'<li><time>'+clockStr(e.m)+'</time><span>'+e.t+'</span></li>').join(''); if(st.innerHTML!==L) st.innerHTML=L||'<li><span>Just arrived.</span></li>'; };
+
+/* ---------- 6 · progress you can see ---------- */
+const skyG=new THREE.Group(); let skyMats=[];
+function skylineTier(){ const nw=netWorth(); return nw>=400000?3:nw>=100000?2:nw>=25000?1:0; }
+function winTex(){ const c=document.createElement('canvas'); c.width=64; c.height=128; const g=c.getContext('2d'); g.fillStyle='#000'; g.fillRect(0,0,64,128); for(let y=6;y<124;y+=12) for(let x=6;x<60;x+=14){ if(Math.random()<.62){ g.fillStyle=pick(['#FDE68A','#FCD34D','#BAE6FD','#FEF3C7']); g.fillRect(x,y,8,7); } } const t=new THREE.CanvasTexture(c); t.wrapS=t.wrapT=THREE.RepeatWrapping; return t; }
+function buildSkyline(tier){ while(skyG.children.length) skyG.remove(skyG.children[0]); skyMats=[];
+  if(!skyG.parent) scene.add(skyG);
+  const plate=new THREE.Mesh(BOX, mat('#141B2B',{roughness:1})); plate.scale.set(10,.3,N+.6); plate.position.set(-OFF-8.3,-.25,0); skyG.add(plate);
+  const sw=new THREE.Mesh(BOX, mat('#64748B',{roughness:.9})); sw.scale.set(.4,.12,N+.6); sw.position.set(-OFF-3.05,-.03,0); skyG.add(sw);
+  const count=[7,12,17,23][tier], wt=winTex(); let seed=11; const R=()=>{ seed=(seed*9301+49297)%233280; return seed/233280; };
+  for(let i=0;i<count;i++){ const z=-OFF+1+R()*(N-2), x=-OFF-4.2-R()*8, w=.9+R()*1.4, d=.9+R()*1.4, h=(1.5+R()*3.5)*(1+tier*.35)*(i<3&&tier>=2?1.6:1);
+    const m=new THREE.MeshStandardMaterial({color:pick(['#1E293B','#273449','#1F2A3D','#2B3A55']), roughness:.7, emissive:'#FFFFFF', emissiveMap:wt.clone(), emissiveIntensity:.2}); m.emissiveMap.repeat.set(Math.max(1,Math.round(w)),Math.max(1,Math.round(h/1.4))); m.emissiveMap.needsUpdate=true; skyMats.push(m);
+    const b=new THREE.Mesh(BOX,m); b.scale.set(w,h,d); b.position.set(x,h/2-.1,z); b.castShadow=false; skyG.add(b); }
+  if(tier>=3){ const m=new THREE.MeshStandardMaterial({color:'#0B1220', emissive:'#00E676', emissiveIntensity:.5, roughness:.4}); const t=new THREE.Mesh(BOX,m); t.scale.set(2.2,11,2.2); t.position.set(-OFF-8,5.4,-2); skyG.add(t); skyMats.push(m); const sg=signPlane(skyG,'MONEYBOT','#03140C','#00E676',2.4,.5,-OFF-8,10.4,-.85,1); }
+  /* gate dressing */
+  const gx=-OFF+ENT.x, gz=ENT.y-OFF;
+  if(tier>=1){ [-1,1].forEach(s=>{ cy(skyG,.04,1.9,gx+.2,0,gz+s*1.25,mat('#CBD5E1',{metalness:.6,roughness:.3})); const f=new THREE.Mesh(BOX, mat(pick(['#00E676','#FBBF24','#3B82F6']))); f.scale.set(.03,.32,.5); f.position.set(gx+.2,1.7,gz+s*1.25+s*.27); skyG.add(f); }); for(let k=0;k<7;k++){ const bulb=new THREE.Mesh(SPH, new THREE.MeshBasicMaterial({color:pick(['#FDE68A','#F9A8D4','#86EFAC','#93C5FD'])})); bulb.scale.setScalar(.05); bulb.position.set(gx+.1, 1.75-Math.sin(k/6*Math.PI)*.25, gz-1.1+k*.367); skyG.add(bulb); } }
+  if(tier>=2){ [-1,1].forEach(s=>{ bx(skyG,.5,.35,.5,gx+.9,0,gz+s*1.6,mat('#A16207')); for(let k=0;k<5;k++){ const fl=new THREE.Mesh(SPH, mat(pick(['#F472B6','#FBBF24','#A78BFA','#FB7185']))); fl.scale.setScalar(.08); fl.position.set(gx+.9+(k%3-1)*.14,.42,gz+s*1.6+(k-2)*.09); skyG.add(fl); } }); }
+  if(tier>=3){ const ring=new THREE.Mesh(new THREE.TorusGeometry(.55,.06,10,32), new THREE.MeshStandardMaterial({color:'#FBBF24', emissive:'#FBBF24', emissiveIntensity:.6, metalness:.6, roughness:.3})); ring.position.set(gx+.1,2.45,gz); ring.rotation.y=Math.PI/2; skyG.add(ring); }
+  skyG.userData.tier=tier; }
+function fireworkShow(sec){ FUN.fwUntil=performance.now()+sec*1000; }
+function fwTick(dt){ const showing=FUN.fwUntil && performance.now()<FUN.fwUntil;
+  if(showing && Math.random()<dt*3 && FUN.fw.length<12){ const n=70, geo=new THREE.BufferGeometry(), pos=new Float32Array(n*3), vel=[]; const c=new THREE.Vector3(-OFF-6+rand(-4,4), rand(7,11), rand(-8,8)); for(let i=0;i<n;i++){ pos.set([c.x,c.y,c.z],i*3); vel.push(new THREE.Vector3(rand(-1,1),rand(-1,1),rand(-1,1)).normalize().multiplyScalar(rand(2.5,4.5))); } geo.setAttribute('position',new THREE.BufferAttribute(pos,3)); const m=new THREE.Points(geo,new THREE.PointsMaterial({color:pick(['#00E676','#FBBF24','#EC4899','#3B82F6','#F8FAFC']),size:.26,transparent:true,opacity:1,blending:THREE.AdditiveBlending,depthWrite:false})); scene.add(m); FUN.fw.push({m,vel,t:0}); tone(rand(160,240),.4,'sine',.04); }
+  FUN.fw=FUN.fw.filter(f=>{ f.t+=dt; const a=f.m.geometry.attributes.position; for(let i=0;i<f.vel.length;i++){ f.vel[i].y-=dt*2.2; a.array[i*3]+=f.vel[i].x*dt; a.array[i*3+1]+=f.vel[i].y*dt; a.array[i*3+2]+=f.vel[i].z*dt; } a.needsUpdate=true; f.m.material.opacity=Math.max(0,1-f.t/1.6); if(f.t>1.6){ scene.remove(f.m); f.m.geometry.dispose(); return false; } return true; }); }
+FUN.fireworks=fireworkShow; FUN.buildSkyline=buildSkyline;
+
+/* ---------- overlay loop: markers, Rusty, skyline, fireworks ---------- */
+const pool=[]; let lastT=performance.now(), slow=0;
+function mk(i){ let e=pool[i]; if(!e){ e=document.createElement('div'); over.appendChild(e); pool[i]=e; } e.style.display=''; return e; }
+function loop(){ requestAnimationFrame(loop); const now=performance.now(), dt=Math.min(.1,(now-lastT)/1000); lastT=now; if(!S || titleMode || !heroRig){ over.style.display='none'; rt.style.opacity=0; return; } over.style.display='';
+  let i=0;
+  if(!ui.rideCam && !ui.photo){
+    const camD=camera.position.distanceTo(controls.target);
+    for(const s of shops()){ if(i>=24) break; if(s.queue && s.queue.length>=4 && s.staff>0){ const p=scr(objCenter(s).setY(SHOPS[s.kind].hgt+1.05)); if(p){ const e=mk(i++); e.className='mk tap'; e.textContent='⚡ Tap to serve · '+s.queue.length; e.style.left=p[0]+'px'; e.style.top=p[1]+'px'; } } }
+    for(const r of rides()){ if(i>=30) break; if(r.rs==='broken' && !r.building){ const p=scr(objCenter(r).setY(2.2)); if(p){ const e=mk(i++); e.className='mk fix'; e.textContent='🔧 Tap to fix'+(r.fixT?' · '+r.fixT*20+'%':''); e.style.left=p[0]+'px'; e.style.top=p[1]+'px'; } } }
+    for(const b of S.bots){ if(i>=60) break; if(!(b.lost||b.critic&&!b.found||b.celeb||b.reg&&camD<30||b.sick>0&&camD<30)) continue; const r=botMeshes.get(b.id); if(!r||!r.root.visible) continue; const p=scr(r.root.position.clone().setY(.95)); if(!p) continue; const e=mk(i++);
+      if(b.lost){ e.className='mk lost'; e.textContent='😢 Tap me'; } else if(b.critic){ e.className='mk'; e.textContent='❓'; } else if(b.celeb){ e.className='mk celeb'; e.textContent='⭐ DJ Volt'; } else if(b.sick>0){ e.className='mk dz'; e.textContent='💫'; } else { e.className='mk reg'; e.textContent='⭐'; }
+      e.style.left=p[0]+'px'; e.style.top=p[1]+'px'; } }
+  for(let k=i;k<pool.length;k++) pool[k].style.display='none';
+  /* dizzy wobble */
+  for(const b of S.bots){ const r=botMeshes.get(b.id); if(r) r.root.rotation.z = b.sick>0 ? Math.sin(now/140+b.id)*.18 : 0; }
+  /* Rusty: talk bubble follows him, docks bottom-right when he's off screen */
+  if(rustyRig && rustyRig.root.visible && rt.style.opacity==='1'){ const p=scr(rustyRig.root.position.clone().setY(1.1)); if(p && p[0]>40 && p[0]<innerWidth-40 && p[1]>80 && p[1]<innerHeight-60){ rt.classList.remove('dock'); rt.style.left=p[0]+'px'; rt.style.top=p[1]+'px'; } else rt.classList.add('dock'); }
+  slow+=dt; if(slow>1){ slow=0;
+    if(S.speed>0 && S.min>8*60 && S.min<20*60 && Math.random()<.08){ const lit=litterCount(); rustyLine(lit>40?'trash':S.cash<400?'broke':S.rating>=4.3?'good':'idle'); }
+    const tier=skylineTier(); if(skyG.userData.tier!==tier){ const up=skyG.userData.tier!=null && tier>skyG.userData.tier; buildSkyline(tier); if(up){ fireworkShow(14); confetti(); sfx('fanfare'); news(['','Bot City noticed you: new buildings across the road and lights on the gate.','Bot City is booming: the skyline is taller and your gate got a makeover.','You\'re the heart of Bot City now. The MoneyBot tower lights up the skyline.'][tier], null, 'info'); } }
+    const nt=night(); skyMats.forEach(m=>{ m.emissiveIntensity = m.emissive.getHex()===0x00E676 ? .5+nt : .15+nt*1.1; }); }
+  fwTick(dt);
+}
+requestAnimationFrame(loop);
+/* goal medals get a fireworks show too */
+const _wg=winGoal; winGoal=function(id){ const r=_wg.apply(this, arguments); fireworkShow(16); return r; };
+})();
 </script>
 
 </body></html>
